@@ -6,7 +6,13 @@
 <title>Nexus 3D</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
-
+<!--
+  BANCO DE DADOS (Firebase) — para os produtos adicionados/editados/removidos pelo
+  lojista ficarem permanentes para TODOS os visitantes (não só no seu navegador).
+  Veja as instruções de configuração no bloco "FIREBASE_CONFIG" dentro do <script>
+  mais abaixo. Enquanto não configurar, o site funciona normalmente usando apenas
+  localStorage (ou seja: as alterações do painel só aparecem no seu navegador).
+-->
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js"></script>
 <link rel="stylesheet" href="style.css">
@@ -154,7 +160,11 @@
 </aside>
 
 
-
+<!-- ==================================================================
+     LOGIN DO LOJISTA (administrador)
+     Credenciais fixas no código — ver constantes ADMIN_USER / ADMIN_PASS
+     no bloco ADMINISTRADOR do script, logo abaixo.
+     ================================================================== -->
 <div class="overlay top" id="admin-login-overlay"></div>
 <div class="modal simple-modal" id="admin-login-modal" role="dialog" aria-modal="true" aria-labelledby="admin-login-title" aria-hidden="true">
   <button type="button" class="btn m-close" id="admin-login-close" aria-label="Fechar">Fechar</button>
@@ -174,12 +184,15 @@
   </div>
 </div>
 
-
+<!-- ==================================================================
+     PAINEL DO LOJISTA — lista de produtos + botão para adicionar
+     ================================================================== -->
 <div class="overlay top" id="admin-overlay"></div>
 <div class="modal simple-modal admin-modal" id="admin-modal" role="dialog" aria-modal="true" aria-labelledby="admin-title" aria-hidden="true">
   <button type="button" class="btn m-close" id="admin-close" aria-label="Fechar">Fechar</button>
   <div class="admin-body">
     <h2 id="admin-title">Painel do lojista</h2>
+    <p class="hint" id="admin-status" role="status" aria-live="polite" hidden></p>
     <p class="hint" id="admin-hint">As alterações feitas aqui ficam salvas somente neste navegador, até o site ter um banco de dados de verdade.</p>
     <div style="display:flex; gap:8px; flex-wrap:wrap;">
       <button type="button" class="btn btn-primary" id="admin-new">+ Novo produto</button>
@@ -189,7 +202,9 @@
   </div>
 </div>
 
-
+<!-- ==================================================================
+     FORMULÁRIO DO LOJISTA — reaproveitado para criar e para editar
+     ================================================================== -->
 <div class="overlay top" id="admin-form-overlay"></div>
 <div class="modal simple-modal admin-form-modal" id="admin-form-modal" role="dialog" aria-modal="true" aria-labelledby="admin-form-title" aria-hidden="true">
   <button type="button" class="btn m-close" id="admin-form-close" aria-label="Fechar">Fechar</button>

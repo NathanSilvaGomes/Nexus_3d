@@ -42,7 +42,9 @@
       var(--surface);
     border-bottom: 1px solid var(--line);
   }
- 
+  /* Logo centralizada no meio do topo, ações (login + carrinho) fixas na direita.
+     As colunas "auto" das pontas absorvem o espaço sobrando, então a logo
+     (coluna do meio, 1fr) fica no centro real da barra. */
   .top { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 24px; padding: 38px 0 0; }
   .top .logo { grid-column: 2; justify-self: center; }
   .top .actions { grid-column: 3; justify-self: end; }
@@ -249,7 +251,12 @@
 
   .thumbs[hidden] { display: none; }
   .m-photo img, .thumbs img { object-fit: contain; background: #fff; }
-
+  /* ------------------------------------------------------------------
+     Login do cliente, login do lojista e painel do lojista.
+     Reaproveitam a base visual de .modal (mesmo posicionamento/overlay),
+     mas em coluna única (sem a grade de 2 colunas usada no modal de
+     produto) — por isso a classe extra .simple-modal.
+     ------------------------------------------------------------------ */
   .simple-modal.open { display: block; padding: 26px 24px 24px; max-width: 460px; }
   .simple-modal.admin-modal.open,
   .simple-modal.admin-form-modal.open { max-width: 640px; }

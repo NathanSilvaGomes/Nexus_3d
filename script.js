@@ -1,5 +1,31 @@
+/* ====================================================================
+   NEXUS 3D — script único da página.
 
+   Como o arquivo está organizado, de cima para baixo:
+   1. CATÁLOGO BASE   — lista de produtos escrita à mão (BASE_PRODUCTS)
+   2. FOTOS           — fotos reais associadas a produtos pelo nome
+   3. ILUSTRAÇÕES     — desenhos SVG usados quando não há foto real
+   4. CATÁLOGO FINAL  — junta o catálogo base com o que o lojista
+                         adicionar/editar/remover pelo painel (overrides)
+   5. LISTAGEM        — busca, categorias, ordenação, grade de produtos
+   6. CARRINHO        — itens, quantidades, endereço de entrega
+   7. MODAL DE PRODUTO — galeria de fotos e detalhes de cada peça
+   8. PEDIR PEÇA NOVA  — formulário com foto de referência
+   9. ADMINISTRADOR    — login e painel do lojista (add/editar/remover)
 
+   IMPORTANTE sobre o item 9: ainda não existe um banco de dados real
+   por trás do site. As alterações do lojista ficam guardadas em
+   localStorage, ou seja, só nesse navegador — nada é compartilhado
+   entre visitantes nem sincronizado entre aparelhos. A senha do
+   lojista fica em texto simples, sem criptografia. Isso é aceitável
+   só como demonstração; antes de vender de verdade, troque por um
+   backend com banco de dados e senha criptografada.
+
+   Não há mais login obrigatório para o cliente comprar — o carrinho
+   só pede nome e endereço de entrega antes de liberar o WhatsApp.
+   ==================================================================== */
+
+/* ------------------- 1) CATÁLOGO BASE — edite aqui ------------------- */
 const BASE_PRODUCTS = [
   { name: "Action Figure Soldado Star Wars", cat: "Star Wars", price: 50.00, size: "" },
   { name: "Porta Baralho 1", cat: "Utensílios", price: 25.00, size: "" },
@@ -147,7 +173,36 @@ const pics = (p) => {
 };
 const picHtml = (pic, alt) => pic.src ? `<img src="${pic.src}" alt="${esc(alt)}">` : pic.svg;
 
+/* ======================================================================
+   4) CATÁLOGO FINAL — mistura o catálogo base com as alterações feitas
+   pelo lojista no painel (produto novo, edição, remoção).
 
+   PERSISTÊNCIA: as alterações são salvas no Firebase Realtime Database,
+   para ficarem permanentes e aparecerem para QUALQUER pessoa que acessar
+   o site (não só no navegador de quem editou). Como fallback — enquanto
+   o Firebase não estiver configurado, ou se a conexão falhar — tudo
+   também é guardado em localStorage, para o site nunca quebrar.
+
+   ---------------------------------------------------------------------
+   COMO ATIVAR O FIREBASE (gratuito, ~5 minutos, faça uma vez só):
+   1. Acesse https://console.firebase.google.com e crie um projeto grátis.
+   2. No menu lateral, abra "Realtime Database" e clique em "Criar banco
+      de dados" (pode escolher a região padrão). Comece em "modo de teste".
+   3. Em "Regras" (aba Rules) do Realtime Database, cole isto e publique
+      (permite todo mundo LER o catálogo, mas só quem souber escrever
+      através do seu site poderá alterar — é uma proteção básica, como
+      o restante do login do lojista hoje, que também é só no front-end):
+         {
+           "rules": { "overrides": { ".read": true, ".write": true } }
+         }
+   4. No projeto, vá em Configurações do projeto → "Seus apps" → ícone
+      "</>" para criar um app Web. Copie o objeto "firebaseConfig" que
+      aparece e cole substituindo o objeto FIREBASE_CONFIG logo abaixo.
+   5. Salve o arquivo e publique de novo. Pronto: a partir daí, tudo que
+      o painel do lojista adicionar/editar/apagar fica salvo no banco e
+      aparece para todos os visitantes, em qualquer aparelho.
+   ---------------------------------------------------------------------
+   ====================================================================== */
 const CATALOG_KEY = "nexus3d-catalog-overrides-v1";
 
 // COLE AQUI o firebaseConfig copiado do passo 4 acima. Enquanto ficar
@@ -172,10 +227,29 @@ if (firebaseReady() && window.firebase) {
 }
 
 function emptyOverrides() { return { removed: [], edited: {}, added: [] }; }
+
+// O Firebase NÃO aceita os caracteres . # $ [ ] / dentro de chaves. Como as edições
+// são guardadas com o NOME do produto como chave (ex.: "Vaso 10/20"), codificamos
+// esses caracteres ao salvar e decodificamos ao ler. Sem isso, editar qualquer
+// produto com esses caracteres no nome fazia o salvamento inteiro ser rejeitado.
+function fbKeyEncode(k) { return String(k).replace(/[%.#$\[\]\/]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")); }
+function fbKeyDecode(k) { return String(k).replace(/%([0-9A-F]{2})/g, (_, x) => String.fromCharCode(parseInt(x, 16))); }
+
+// Firebase transforma listas vazias/objetos vazios em "nada" e pode devolver listas
+// como objetos; aqui voltamos tudo ao formato que o resto do código espera.
+function toArray(v) { return Array.isArray(v) ? v.filter((x) => x != null) : (v && typeof v === "object" ? Object.values(v) : []); }
+function normProduct(p) { return p && typeof p === "object" ? { ...p, imgs: toArray(p.imgs) } : p; }
 function normalizeOverrides(o) {
-  return o && typeof o === "object"
-    ? { removed: o.removed || [], edited: o.edited || {}, added: o.added || [] }
-    : emptyOverrides();
+  if (!o || typeof o !== "object") return emptyOverrides();
+  const edited = {};
+  Object.keys(o.edited || {}).forEach((k) => { edited[fbKeyDecode(k)] = normProduct(o.edited[k]); });
+  return { removed: toArray(o.removed), edited, added: toArray(o.added).map(normProduct) };
+}
+// Versão pronta para enviar ao Firebase: chaves seguras e nenhum "undefined".
+function overridesForFirebase(o) {
+  const edited = {};
+  Object.keys(o.edited || {}).forEach((k) => { edited[fbKeyEncode(k)] = o.edited[k]; });
+  return JSON.parse(JSON.stringify({ removed: o.removed || [], edited, added: o.added || [] }));
 }
 function loadOverrides() {
   try {
@@ -184,17 +258,72 @@ function loadOverrides() {
   } catch (e) { return emptyOverrides(); }
 }
 function saveOverridesLocal() { try { localStorage.setItem(CATALOG_KEY, JSON.stringify(overrides)); } catch (e) {} }
-// Salva no Firebase (se configurado) e sempre também em localStorage como cache/fallback.
+// Mostra no painel do lojista o resultado real do salvamento (salvando / salvo / erro).
+function setSaveStatus(kind, msg) {
+  const el = document.getElementById("admin-status");
+  if (!el) return;
+  el.hidden = !msg; el.textContent = msg || "";
+  el.style.color = kind === "error" ? "#c0392b" : kind === "ok" ? "#1e8e4e" : "";
+  el.style.fontWeight = "700";
+}
+function explainFirebaseError(e) {
+  const code = (e && (e.code || e.message)) || String(e);
+  if (/PERMISSION_DENIED/i.test(code)) return "O Firebase recusou a gravação (PERMISSION_DENIED). As regras do Realtime Database provavelmente expiraram ou não permitem escrita — abra Firebase → Realtime Database → Regras e publique: {\"rules\":{\"overrides\":{\".read\":true,\".write\":true}}}";
+  if (/network|offline|unavailable|disconnect/i.test(code)) return "Sem conexão com o Firebase agora. Verifique a internet e tente de novo.";
+  return "Erro ao gravar no Firebase: " + code;
+}
+// Salva em localStorage (cache) e, se o Firebase estiver ligado, no banco.
+// Retorna uma Promise<boolean>: true = gravado de verdade no banco; false = falhou.
+// Se o banco recusar, NADA é perdido em silêncio: o produto continua na tela e o
+// lojista recebe um aviso claro de que ainda não está permanente.
 function saveOverrides() {
   saveOverridesLocal();
-  if (fbDb) { try { fbDb.ref("overrides").set(overrides); } catch (e) {} }
+  if (!fbDb) {
+    // Sem Firebase carregado o produto só existe neste navegador: avisamos em vermelho,
+    // porque o lojista NÃO deve entender isso como "salvo para todos".
+    setSaveStatus("error", "⚠ Salvo só neste navegador — o Firebase não carregou nesta página, então NÃO está permanente. Recarregue a página; se continuar, desative bloqueadores de anúncios/rastreamento para este site.");
+    return Promise.resolve(false);
+  }
+  let payload;
+  try { payload = overridesForFirebase(overrides); } catch (e) { setSaveStatus("error", "Não foi possível preparar os dados: " + e.message); return Promise.resolve(false); }
+  const bytes = JSON.stringify(payload).length;
+  if (bytes > 9 * 1024 * 1024) {
+    setSaveStatus("error", "Os dados ficaram grandes demais (" + (bytes / 1048576).toFixed(1) + " MB). Remova algumas fotos ou use fotos menores.");
+    return Promise.resolve(false);
+  }
+  const snapshot = JSON.parse(JSON.stringify(overrides));
+  setSaveStatus("", "Salvando no banco de dados…");
+  return fbDb.ref("overrides").set(payload).then(() => {
+    setSaveStatus("ok", "✓ Salvo permanentemente — já aparece para todos os visitantes.");
+    return true;
+  }).catch((e) => {
+    // O Firebase reverte o dado local quando o servidor recusa; reaplicamos o que o
+    // lojista fez para não sumir da tela, e avisamos que NÃO foi salvo no banco.
+    overrides = snapshot; saveOverridesLocal();
+    refreshCatalog(); if (isAdmin()) renderAdminList();
+    const msg = explainFirebaseError(e);
+    setSaveStatus("error", "✗ NÃO salvo permanentemente. " + msg);
+    alert("Atenção: a alteração NÃO foi salva no banco de dados.\n\n" + msg);
+    return false;
+  });
 }
 let overrides = loadOverrides();
 
-
+// Se o Firebase estiver configurado, escuta em tempo real: assim que o lojista
+// salva uma alteração, todo mundo que estiver com o site aberto (nesse
+// aparelho ou em qualquer outro) recebe o catálogo atualizado automaticamente.
+function hasOverrides(o) { return !!(o && (o.removed.length || Object.keys(o.edited).length || o.added.length)); }
 if (fbDb) {
+  let firstSnap = true;
   fbDb.ref("overrides").on("value", (snap) => {
     const val = snap.val();
+    // Migração: se o banco está VAZIO mas este navegador, logado como lojista, tem
+    // produtos guardados que nunca chegaram ao banco (versão antiga do site que falhava
+    // em silêncio), enviamos esses produtos agora em vez de apagá-los.
+    if (firstSnap) {
+      firstSnap = false;
+      if (val == null && isAdmin() && hasOverrides(overrides)) { saveOverrides(); return; }
+    }
     overrides = normalizeOverrides(val);
     saveOverridesLocal();
     if (typeof refreshCatalog === "function") refreshCatalog();
@@ -225,8 +354,9 @@ function refreshCatalog() {
   renderCats(); render(); renderCart();
 }
 
-let PRODUCTS = buildProducts();  
-let CATS = buildCats();           
+/* ------------------- 5) LISTAGEM — estado e renderização ------------------- */
+let PRODUCTS = buildProducts();   // catálogo final exibido no site
+let CATS = buildCats();           // categorias derivadas de PRODUCTS
 
 const state = { cat: "Todos", q: "", sort: "default" };
 const $ = (s) => document.querySelector(s);
@@ -234,6 +364,7 @@ const norm = (s) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCa
 const money = (v) => v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
+// Desenha os botões de categoria a partir de CATS (item 4 recalcula CATS quando muda).
 function renderCats() {
   $("#cats").innerHTML = CATS.map((c) =>
     `<button type="button" class="chip" data-cat="${esc(c)}" aria-pressed="${c === state.cat}">${esc(c)}</button>`
@@ -278,7 +409,11 @@ $("#grid").addEventListener("click", (e) => {
   if (e.target.id === "reset") { state.q = ""; state.cat = "Todos"; $("#q").value = ""; renderCats(); render(); }
 });
 
-
+/* ============================================================
+   CONTATOS — troque pelos seus.
+   WHATSAPP: só números, com país e DDD (ex.: 5531999999999)
+   INSTAGRAM: usuário sem o @
+   ============================================================ */
 const WHATSAPP = "5531995702013";
 const INSTAGRAM = "nexus3d";
 
@@ -286,6 +421,7 @@ const waLink = (text) => `https://wa.me/${WHATSAPP}${text ? "?text=" + encodeURI
 $("#wa-top").href = waLink("Olá, Nexus 3D! Vim pelo site.");
 $("#ig-top").href = "https://www.instagram.com/nexus_3d_impressao?stkn=MW10MnJtY3Mya2ttaQ==";
 
+/* ------------------- 6) CARRINHO — itens, quantidades, endereço ------------------- */
 let cart = {};
 try { cart = JSON.parse(localStorage.getItem("nexus3d-cart-v2") || "{}") || {}; } catch (e) { cart = {}; }
 const saveCart = () => { try { localStorage.setItem("nexus3d-cart-v2", JSON.stringify(cart)); } catch (e) {} };
@@ -376,6 +512,7 @@ $("#lines").addEventListener("click", (e) => {
 $("#clear").addEventListener("click", () => { cart = {}; saveCart(); renderCart(); });
 $("#buyer").addEventListener("input", renderCart);
 
+/* ------------------- 8) PEDIR PEÇA NOVA — formulário com foto de referência ------------------- */
 function renderRequest() {
   const item = $("#req-item").value.trim();
   const details = $("#req-details").value.trim();
@@ -388,6 +525,7 @@ function renderRequest() {
 ["#req-item", "#req-details", "#req-name"].forEach((s) => $(s).addEventListener("input", renderRequest));
 
 
+/* ------------------- 7) MODAL DE PRODUTO — galeria e detalhes ------------------- */
 const modal = $("#modal"), mOverlay = $("#m-overlay");
 let mProduct = null, mFocus = null, mPics = [], mIdx = 0;
 function openModal(id) {
@@ -450,7 +588,16 @@ $("#ad-cep").addEventListener("input", (e) => {
   if (d.length === 8) lookupCep(d);
 });
 
-
+// Busca rua, bairro, cidade e UF a partir do CEP, usando a API pública e
+// gratuita ViaCEP. Só preenche sozinho o que o cliente ainda não digitou à
+// mão (rua e bairro); cidade e UF são sempre atualizadas pelo resultado.
+// Se não houver internet, a API estiver fora do ar, ou o CEP não existir,
+// o aviso abaixo do campo aparece e o cliente preenche o endereço manualmente —
+// o formulário nunca trava esperando a busca.
+// IMPORTANTE: esta busca automática só funciona quando a página está hospedada
+// de verdade (seu próprio site) ou aberta localmente. A pré-visualização
+// publicada aqui pelo Claude bloqueia chamadas de rede para sites de fora,
+// então nela o campo aceita a digitação normalmente, mas não autocompleta.
 async function lookupCep(digits) {
   $("#cep-status").textContent = "Buscando endereço…"; $("#cep-status").hidden = false;
   try {
@@ -468,6 +615,7 @@ async function lookupCep(digits) {
   }
 }
 
+/* ---------- foto de referência ---------- */
 let refPhoto = false;
 $("#req-photo").addEventListener("change", (e) => {
   const f = e.target.files && e.target.files[0];
@@ -487,9 +635,17 @@ function clearPhoto() {
 $("#req-remove").addEventListener("click", clearPhoto);
 
 
+/* ======================================================================
+   10) ADMINISTRADOR — login e painel do lojista.
 
-const ADMIN_USER = "adm";        
-const ADMIN_PASS = "Nexus3d9641";  
+   ATENÇÃO: ADMIN_USER e ADMIN_PASS ficam escritos aqui no código-fonte,
+   então qualquer pessoa que abrir "Ver código-fonte" da página consegue
+   lê-los. Isso é aceitável só como demonstração — troque os valores
+   abaixo antes de divulgar o site, e substitua por um login de verdade
+   (com backend) antes de usar em produção.
+   ====================================================================== */
+const ADMIN_USER = "admin";        // TODO: troque este usuário
+const ADMIN_PASS = "nexus3d123";   // TODO: troque esta senha
 const ADMIN_SESSION_KEY = "nexus3d-admin-session-v1";
 
 function isAdmin() { try { return localStorage.getItem(ADMIN_SESSION_KEY) === "1"; } catch (e) { return false; } }
@@ -534,6 +690,12 @@ function renderAdminList() {
 function openAdminPanel() {
   adminLastFocus = document.activeElement;
   renderAdminList();
+  // Avisa se as alterações estão realmente permanentes (Firebase conectado) ou
+  // se, por enquanto, só ficam salvas neste navegador (sem Firebase configurado,
+  // ou rodando dentro da prévia do Claude, que bloqueia a conexão externa).
+  $("#admin-hint").textContent = fbDb
+    ? "As alterações feitas aqui ficam salvas permanentemente e aparecem para todos os visitantes do site."
+    : "As alterações feitas aqui ficam salvas somente neste navegador, até o Firebase ser configurado (veja as instruções no início do código).";
   adminModal.classList.add("open"); adminOverlay.classList.add("open"); adminModal.setAttribute("aria-hidden", "false");
   $("#admin-close").focus();
 }
@@ -592,13 +754,41 @@ $("#admin-form-close").addEventListener("click", closeAdminForm);
 adminFormOverlay.addEventListener("click", closeAdminForm);
 
 // Cada foto escolhida é lida como data URI e entra na lista de pré-visualização.
-$("#af-photos").addEventListener("change", (e) => {
-  Array.from(e.target.files || []).forEach((f) => {
+// Fotos de celular têm vários MB cada; guardadas assim, estouravam o limite do banco
+// (e do localStorage) e o produto não era salvo. Por isso cada foto é redimensionada
+// (lado maior = 900 px) e recomprimida em JPEG antes de entrar na lista (~60–150 KB).
+function compressImage(file, maxSide = 900, quality = 0.8) {
+  return new Promise((resolve) => {
     const r = new FileReader();
-    r.onload = () => { pendingPhotos.push(r.result); renderAfPreview(); };
-    r.readAsDataURL(f);
+    r.onerror = () => resolve(null);
+    r.onload = () => {
+      const original = r.result;
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+          const w = Math.max(1, Math.round(img.width * scale)), hgt = Math.max(1, Math.round(img.height * scale));
+          const cv = document.createElement("canvas"); cv.width = w; cv.height = hgt;
+          const ctx = cv.getContext("2d");
+          ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, w, hgt);   // PNG transparente vira fundo branco
+          ctx.drawImage(img, 0, 0, w, hgt);
+          const out = cv.toDataURL("image/jpeg", quality);
+          resolve(out && out.length < original.length ? out : original);
+        } catch (err) { resolve(original); }
+      };
+      img.onerror = () => resolve(original);
+      img.src = original;
+    };
+    r.readAsDataURL(file);
   });
+}
+$("#af-photos").addEventListener("change", async (e) => {
+  const files = Array.from(e.target.files || []);
   e.target.value = "";
+  for (const f of files) {
+    const data = await compressImage(f);
+    if (data) { pendingPhotos.push(data); renderAfPreview(); }
+  }
 });
 $("#af-preview").addEventListener("click", (e) => {
   const b = e.target.closest("[data-rm]"); if (!b) return;
@@ -628,7 +818,8 @@ $("#admin-form").addEventListener("submit", (e) => {
   } else {
     overrides.added.push(fields);
   }
-  saveOverrides(); refreshCatalog(); renderAdminList(); closeAdminForm();
+  refreshCatalog(); renderAdminList(); closeAdminForm();
+  saveOverrides();   // grava no banco e mostra o resultado em #admin-status
 });
 
 
