@@ -238,7 +238,12 @@ function fbKeyDecode(k) { return String(k).replace(/%([0-9A-F]{2})/g, (_, x) => 
 // Firebase transforma listas vazias/objetos vazios em "nada" e pode devolver listas
 // como objetos; aqui voltamos tudo ao formato que o resto do código espera.
 function toArray(v) { return Array.isArray(v) ? v.filter((x) => x != null) : (v && typeof v === "object" ? Object.values(v) : []); }
-function normProduct(p) { return p && typeof p === "object" ? { ...p, imgs: toArray(p.imgs) } : p; }
+// Só normaliza "imgs" se ele existir: uma edição salva SEM fotos (para não duplicar as do
+// catálogo) precisa continuar sem o campo, senão viraria [] e apagaria as fotos originais.
+function normProduct(p) {
+  if (!p || typeof p !== "object") return p;
+  return p.imgs === undefined ? { ...p } : { ...p, imgs: toArray(p.imgs) };
+}
 function normalizeOverrides(o) {
   if (!o || typeof o !== "object") return emptyOverrides();
   const edited = {};
@@ -276,20 +281,100 @@ function explainFirebaseError(e) {
 // Retorna uma Promise<boolean>: true = gravado de verdade no banco; false = falhou.
 // Se o banco recusar, NADA é perdido em silêncio: o produto continua na tela e o
 // lojista recebe um aviso claro de que ainda não está permanente.
+// Fotos já guardadas (da versão antiga do site, que não comprimia) podem pesar vários MB
+// cada. Antes de gravar, reduzimos automaticamente as que passam de ~150 KB
+// (lado maior 800 px, JPEG qualidade 0,75 → ~50–100 KB). Só mexe em fotos grandes.
+function recompressDataUrl(src, maxSide = 800, quality = 0.75) {
+  return new Promise((resolve) => {
+    if (typeof src !== "string" || src.indexOf("data:image/") !== 0) return resolve(src);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * scale)), h = Math.max(1, Math.round(img.height * scale));
+        const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
+        const ctx = cv.getContext("2d"); ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, w, h); ctx.drawImage(img, 0, 0, w, h);
+        const out = cv.toDataURL("image/jpeg", quality);
+        resolve(out && out.length < src.length ? out : src);
+      } catch (e) { resolve(src); }
+    };
+    img.onerror = () => resolve(src);
+    img.src = src;
+  });
+}
+// Edições antigas de produtos do catálogo base levavam as fotos originais junto (cópia).
+// Se as fotos guardadas são idênticas às do catálogo, removemos a cópia: o produto
+// continua mostrando as mesmas fotos, só que sem pesar no banco.
+function dedupeEditedImgs(o) {
+  let removed = 0;
+  Object.keys(o.edited).forEach((k) => {
+    const e = o.edited[k], b = BASE_PRODUCTS.find((x) => x.name === k);
+    if (e && b && Array.isArray(e.imgs) && JSON.stringify(e.imgs) === JSON.stringify(b.imgs || [])) { delete e.imgs; removed++; }
+  });
+  return removed;
+}
+async function shrinkOverrides(o, minLen = 150000, maxSide = 800, quality = 0.75) {
+  let changed = 0;
+  const shrinkList = async (arr) => {
+    for (let i = 0; i < arr.length; i++) {
+      if (typeof arr[i] === "string" && arr[i].length > minLen) {
+        const out = await recompressDataUrl(arr[i], maxSide, quality);
+        if (out.length < arr[i].length) { arr[i] = out; changed++; }
+      }
+    }
+  };
+  for (const p of o.added) if (p && Array.isArray(p.imgs)) await shrinkList(p.imgs);
+  for (const k of Object.keys(o.edited)) { const p = o.edited[k]; if (p && Array.isArray(p.imgs)) await shrinkList(p.imgs); }
+  return changed;
+}
+// Nome e tamanho (MB) dos cadastros mais pesados, para a mensagem de erro dizer onde mexer.
+function heaviestItems(o, n = 3) {
+  const rows = [];
+  o.added.forEach((p) => { if (p) rows.push([p.name, JSON.stringify(p).length]); });
+  Object.keys(o.edited).forEach((k) => rows.push([k, JSON.stringify(o.edited[k]).length]));
+  return rows.sort((a, b) => b[1] - a[1]).slice(0, n).map((r) => r[0] + " (" + (r[1] / 1048576).toFixed(1) + " MB)").join(", ");
+}
+const SAVE_SOFT_LIMIT = 2.5 * 1024 * 1024;   // acima disso, tenta reduzir as fotos grandes
+const SAVE_HARD_LIMIT = 9 * 1024 * 1024;     // o Firebase recusa gravações acima de ~10 MB
+
+// Gravações são feitas uma de cada vez (fila), para duas ações rápidas seguidas
+// (ex.: remover dois itens) nunca se atropelarem.
+let saveChain = Promise.resolve();
 function saveOverrides() {
   saveOverridesLocal();
+  saveChain = saveChain.then(doSaveOverrides, doSaveOverrides).catch((e) => {
+    // Qualquer erro inesperado (ex.: o Firebase recusando o formato dos dados) vira aviso visível.
+    setSaveStatus("error", "✗ NÃO salvo. Erro inesperado: " + ((e && (e.message || e.code)) || e));
+    return false;
+  });
+  return saveChain;
+}
+async function doSaveOverrides() {
   if (!fbDb) {
     // Sem Firebase carregado o produto só existe neste navegador: avisamos em vermelho,
     // porque o lojista NÃO deve entender isso como "salvo para todos".
     setSaveStatus("error", "⚠ Salvo só neste navegador — o Firebase não carregou nesta página, então NÃO está permanente. Recarregue a página; se continuar, desative bloqueadores de anúncios/rastreamento para este site.");
-    return Promise.resolve(false);
+    return false;
   }
-  let payload;
-  try { payload = overridesForFirebase(overrides); } catch (e) { setSaveStatus("error", "Não foi possível preparar os dados: " + e.message); return Promise.resolve(false); }
-  const bytes = JSON.stringify(payload).length;
-  if (bytes > 9 * 1024 * 1024) {
-    setSaveStatus("error", "Os dados ficaram grandes demais (" + (bytes / 1048576).toFixed(1) + " MB). Remova algumas fotos ou use fotos menores.");
-    return Promise.resolve(false);
+  let payload, bytes;
+  try { dedupeEditedImgs(overrides); payload = overridesForFirebase(overrides); } catch (e) { setSaveStatus("error", "Não foi possível preparar os dados: " + e.message); return false; }
+  bytes = JSON.stringify(payload).length;
+  if (bytes > SAVE_SOFT_LIMIT) {
+    setSaveStatus("", "Otimizando as fotos grandes antes de salvar (" + (bytes / 1048576).toFixed(1) + " MB)… aguarde alguns segundos.");
+    try {
+      await shrinkOverrides(overrides);                       // 1ª etapa: fotos acima de ~150 KB
+      payload = overridesForFirebase(overrides); bytes = JSON.stringify(payload).length;
+      if (bytes > SAVE_HARD_LIMIT) {                          // 2ª etapa, mais forte, só se ainda não couber
+        await shrinkOverrides(overrides, 60000, 700, 0.7);
+        payload = overridesForFirebase(overrides); bytes = JSON.stringify(payload).length;
+      }
+      saveOverridesLocal();
+      refreshCatalog(); if (isAdmin()) renderAdminList();
+    } catch (e) { /* se a otimização falhar, segue para a checagem de tamanho abaixo */ }
+  }
+  if (bytes > SAVE_HARD_LIMIT) {
+    setSaveStatus("error", "Os dados ainda ficaram grandes demais (" + (bytes / 1048576).toFixed(1) + " MB) mesmo depois de otimizar. Mais pesados: " + heaviestItems(overrides) + ". Remova algumas fotos desses itens.");
+    return false;
   }
   const snapshot = JSON.parse(JSON.stringify(overrides));
   setSaveStatus("", "Salvando no banco de dados…");
@@ -811,6 +896,9 @@ $("#admin-form").addEventListener("submit", (e) => {
   if (editingProduct) {
     if (editingProduct.id < 100000) {
       const base = BASE_PRODUCTS.find((b) => b.id === editingProduct.id);
+      // Se as fotos não foram mexidas, NÃO as copiamos para o banco: o produto base já
+      // traz as próprias fotos. Copiar inflava os dados (cada edição levava as fotos junto).
+      if (JSON.stringify(fields.imgs) === JSON.stringify(base.imgs || [])) delete fields.imgs;
       overrides.edited[base.name] = fields;
     } else {
       overrides.added[editingProduct.id - 100000] = fields;
